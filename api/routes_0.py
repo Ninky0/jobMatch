@@ -2,8 +2,8 @@ import asyncio
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from schemas.job import JobInput, JobOutput
-from services.job_generator import llm_generate_job_posting
-
+from core.worker import request_queue
+from core.model_loader import load_llm_pipeline
 
 # 라우터 객체 생성
 router = APIRouter()
@@ -34,5 +34,13 @@ def swagger_js():
 
 
 @router.post("/generate-job-posting", response_model=JobOutput)
-async def generate_job_posting(input_data: JobInput):
-    return await llm_generate_job_posting(input_data)
+async def generate_job_posting(input_data: JobInput, background_tasks: BackgroundTasks, request: Request):
+    """
+    구인공고 생성을 위한 POST 엔드포인트
+    - 모델 파이프라인은 main.py에서 앱 전역 상태(app.state.pipe)로 전달됨
+    """
+    pipe = request.app.state.pipe
+    result_future = asyncio.Future()
+    await request_queue.put((input_data, result_future, pipe))
+    result = await result_future
+    return result

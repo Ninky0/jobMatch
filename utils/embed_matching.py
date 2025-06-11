@@ -26,10 +26,15 @@ K=10
 # 키워드 추출 모델
 kw_model = KeyBERT(snapshot)
 
+# 데이터베이스 로드
 with open('train_data.dill', 'rb') as f:
     trn = dill.load(f)
 with open('jikjong_db.dill', 'rb') as f:
     jikjong = dill.load(f)
+with open('license_db.dill', 'rb') as f:
+    license_db = dill.load(f)
+with open('major_db.dill', 'rb') as f:
+    major_db = dill.load(f)
 
 # html 문자 제거
 def preprocess_keyword(kwrd):
@@ -113,21 +118,108 @@ def predict_job_categories(sent, top_k=K):
     print("*" * 50)
     return pred
 
+# 입력 문장에서 자격증 키워드를 추출하고, 임베딩 후 top-k 자격증 추천
+def predict_license_categories(sent, top_k=K):
+    # 전처리
+    user_inp = preprocess_keyword(sent)
+    user_inp = [candidate[0] for candidate in keyword_extraction(user_inp)]
+    user_inp_kwrd = ' '.join(user_inp)
+    print("user_inp_kwrds:", user_inp_kwrd)
 
-# 하나의 문장에 대한 직종 추천 리스트 반환
+    # 임베딩 및 유사도 계산
+    inp_embed = model.encode(user_inp_kwrd, convert_to_tensor=True)
+    license_ind = get_sim(inp_embed, license_db.db['LICENSE_NM_EMBED'])
+
+    # 자격증 이름 리스트
+    license_list = license_db.db['LICENSE_NM']
+    
+    # top-k 추천 자격증
+    pred = []
+    j = 0
+
+    while len(pred) < top_k:
+        this_license = license_list[license_ind[j]]
+        if this_license not in pred:
+            pred.append(this_license)
+        j += 1
+
+    print("자격증pred:", pred)
+    print("*" * 50)
+    return pred
+
+# 입력 문장에서 전공 키워드를 추출하고, 임베딩 후 top-k 전공 추천
+def predict_major_categories(sent, top_k=K):
+    # 전처리
+    user_inp = preprocess_keyword(sent)
+    user_inp = [candidate[0] for candidate in keyword_extraction(user_inp)]
+    user_inp_kwrd = ' '.join(user_inp)
+    print("user_inp_kwrds:", user_inp_kwrd)
+
+    # 임베딩 및 유사도 계산
+    inp_embed = model.encode(user_inp_kwrd, convert_to_tensor=True)
+    major_ind = get_sim(inp_embed, major_db.db['MAJOR_NM_EMBED'])
+
+    # 전공 이름 리스트
+    major_list = major_db.db['MAJOR_NM']
+    
+    # top-k 추천 전공
+    pred = []
+    j = 0
+
+    while len(pred) < top_k:
+        this_major = major_list[major_ind[j]]
+        if this_major not in pred:
+            pred.append(this_major)
+        j += 1
+
+    print("전공pred:", pred)
+    print("*" * 50)
+    return pred
+
+# 하나의 문장에 대한 직종, 자격증, 전공 추천 리스트 반환
 def embed_matching(sent):
-    return predict_job_categories(sent)
+    # 직종은 6개, 자격증과 전공은 각각 3개씩 예측
+    job_pred = predict_job_categories(sent, top_k=6)
+    license_pred = predict_license_categories(sent, top_k=3)
+    major_pred = predict_major_categories(sent, top_k=3)
+    
+    return {
+        'jobs': job_pred,
+        'licenses': license_pred,
+        'majors': major_pred
+    }
 
-
-# 학습용 전체 데이터셋을 반복하면서 직종 추천 및 평균 라벨 길이 반환
+# 학습용 전체 데이터셋을 반복하면서 직종, 자격증, 전공 추천 및 평균 라벨 길이 반환
 def matching():
     ave_len_label = 0
+    results = {
+        'jobs': [],
+        'licenses': [],
+        'majors': []
+    }
 
     for i, user_inp in tqdm(enumerate(trn.db['STD_DTY_SWRD_CN']), total=trn.len):
         label = trn.db['STD_DTY_CN'][i].split(',')
         ave_len_label += len(label)
 
-        pred = predict_job_categories(user_inp, top_k=K)
+        # 직종은 6개, 자격증과 전공은 각각 3개씩 예측
+        job_pred = predict_job_categories(user_inp, top_k=6)
+        license_pred = predict_license_categories(user_inp, top_k=3)
+        major_pred = predict_major_categories(user_inp, top_k=3)
+
+        # 결과 저장
+        results['jobs'].append(job_pred)
+        results['licenses'].append(license_pred)
+        results['majors'].append(major_pred)
 
     ave_len_label /= trn.len
     print("평균 라벨 길이:", ave_len_label)
+    
+    # 결과 분석
+    print("\n=== 예측 결과 분석 ===")
+    print(f"총 처리된 데이터 수: {len(results['jobs'])}")
+    print(f"직종 예측 평균 개수: {np.mean([len(pred) for pred in results['jobs']]):.2f}")
+    print(f"자격증 예측 평균 개수: {np.mean([len(pred) for pred in results['licenses']]):.2f}")
+    print(f"전공 예측 평균 개수: {np.mean([len(pred) for pred in results['majors']]):.2f}")
+    
+    return results

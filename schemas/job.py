@@ -30,3 +30,5 @@ class JobOutput(BaseModel):
     main_tasks: str
     preferred_qualifications: str
     search_keywords: str
+    recommended_license: str  # 추천 자격증
+    recommended_major: str    # 추천 전공
