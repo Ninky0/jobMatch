@@ -116,7 +116,9 @@ async def llm_generate_job_posting(input_data: JobInput) -> JobOutput:
     # vLLM API 호출
     async with httpx.AsyncClient() as client:
         res = await client.post(
-            "http://localhost:8000/v1/chat/completions",
+            # 이제 요청은 Nginx(80번 포트)로 들어가서 /v1/ 경로를 vLLM에게 프록시해주니까
+            # http://localhost:8000 → http://localhost 로 변경
+            "http://localhost/v1/chat/completions",
             json={
                 "model": "rtzr/ko-gemma-2-9b-it",
                 "messages": [{"role": "user", "content": prompt_input}],
