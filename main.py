@@ -6,8 +6,6 @@ from pathlib import Path
 
 from api.routes import router as api_router
 from api.custom_handler import validation_exception_handler
-from core.worker import start_workers
-from services.job_generator import llm_generate_job_posting
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -29,11 +27,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# 앱 시작 시 비동기 작업자 등록
-@app.on_event("startup")
-async def startup_event():
-    await start_workers(llm_generate_job_posting)
 
 # 라우터 등록
 app.include_router(api_router)
