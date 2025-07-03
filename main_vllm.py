@@ -1,21 +1,36 @@
 # main_vllm.py
 
+import re
 import httpx
 import uvicorn
-import re
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from pathlib import Path
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from pathlib import Path
+from celery import Celery
+from celery.result import AsyncResult
+
+# --- Celery 설정 ---
+celery_app = Celery(
+    "worker",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0"
+)
+
+celery_app.conf.update(
+    task_track_started=True,
+    task_time_limit=300,
+)
+
+# --- FastAPI 설정 ---
+app = FastAPI(title='Job Posting API (vLLM + Celery)', version='2.0.0', docs_url='/docs')
 
 templates = Jinja2Templates(directory="templates")
 static_dir = Path('./static')
-
-app = FastAPI(title='Job Posting API (vLLM)', version='2.0.0', docs_url='/docs')
-app.mount("/static", StaticFiles(directory=static_dir), name='static')
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 입력 데이터 모델
+# --- 모델 정의 ---
 class JobInput(BaseModel):
     business_registration_number: str = Field(..., pattern=r"^\d{3}-\d{2}-\d{5}$")
     company_intro: str
@@ -37,7 +52,7 @@ class JobInput(BaseModel):
             raise ValueError("직무 내용은 최소 10자 이상이어야 합니다.")
         return value
 
-# 출력 데이터 모델
+
 class JobOutput(BaseModel):
     job_title: str
     recommended_occupation_main: str
@@ -48,14 +63,16 @@ class JobOutput(BaseModel):
     preferred_qualifications: str
     search_keywords: str
 
+
+# --- 유틸 함수 ---
 def extract_section(text, section_title):
     pattern = rf"<\s*{re.escape(section_title.strip('<>'))}\s*>\s*(.*?)(?=(<[^>]+>|\Z))"
     match = re.search(pattern, text, re.DOTALL)
     if match:
-        cleaned_text = match.group(1).strip('*').replace('\n','').strip()
+        cleaned_text = match.group(1).strip('*').replace('\n', '').strip()
         return cleaned_text
     return ""
-
+    
 # 프롬프트 구성
 def build_prompt(company_intro, job_description, main_job, sub_job):
     return f"""
@@ -108,29 +125,55 @@ async def call_vllm_chat(prompt: str):
         res.raise_for_status()
         return res.json()["choices"][0]["message"]["content"]
 
-# POST API 엔드포인트
-@app.post("/generate-job-posting", response_model=JobOutput)
-async def generate_job_posting(input_data: JobInput):
-    try:
-        # 직종 추천 임시 하드코딩 (원래는 embed_matching 결과)
-        main_job = "회계원, 경리, 경영지원직, 회계사무원, 수금업무"
-        sub_job = "총무직, 재무직, 경영관리직, 일반사무직, 일반관리직"
 
-        prompt = build_prompt(input_data.company_intro, input_data.job_description, main_job, sub_job)
-        llm_output = await call_vllm_chat(prompt)
+# --- Celery Task 정의 ---
+@celery_app.task(name="generate_job_posting_task")
+def generate_job_posting_task(input_data: dict):
+    import asyncio
+    main_job = "회계원, 경리, 경영지원직, 회계사무원, 수금업무"
+    sub_job = "총무직, 재무직, 경영관리직, 일반사무직, 일반관리직"
+    prompt = build_prompt(input_data["company_intro"], input_data["job_description"], main_job, sub_job)
 
-        return JobOutput(
-            job_title=extract_section(llm_output, "<공고 제목>"),
-            recommended_occupation_main=extract_section(llm_output, "<모집 직종>"),
-            recommended_occupation_sub=extract_section(llm_output, "<관련 직종>"),
-            recommended_job=extract_section(llm_output, "<모집 직무>"),
-            job_intro=extract_section(llm_output, "<직무 소개>"),
-            main_tasks=extract_section(llm_output, "<주요 업무>"),
-            preferred_qualifications=extract_section(llm_output, "<우대 사항>"),
-            search_keywords=extract_section(llm_output, "<검색키워드>")
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM 오류: {str(e)}")
+    # asyncio 루프 돌려서 httpx 호출
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    llm_output = loop.run_until_complete(call_vllm_chat(prompt))
 
+    return {
+        "job_title": extract_section(llm_output, "<공고 제목>"),
+        "recommended_occupation_main": extract_section(llm_output, "<모집 직종>"),
+        "recommended_occupation_sub": extract_section(llm_output, "<관련 직종>"),
+        "recommended_job": extract_section(llm_output, "<모집 직무>"),
+        "job_intro": extract_section(llm_output, "<직무 소개>"),
+        "main_tasks": extract_section(llm_output, "<주요 업무>"),
+        "preferred_qualifications": extract_section(llm_output, "<우대 사항>"),
+        "search_keywords": extract_section(llm_output, "<검색키워드>"),
+    }
+
+
+# --- 라우터 ---
+@app.post("/generate-job-posting")
+async def generate_job(input_data: JobInput):
+    task = generate_job_posting_task.delay(input_data.dict())
+    return {"task_id": task.id}
+
+
+@app.get("/job-status/{task_id}")
+def get_task_result(task_id: str):
+    result: AsyncResult = celery_app.AsyncResult(task_id)
+
+    if result.state == "PENDING":
+        return {"status": "PENDING"}
+    elif result.state == "STARTED":
+        return {"status": "STARTED"}
+    elif result.state == "SUCCESS":
+        return {"status": "SUCCESS", "result": result.result}
+    elif result.state == "FAILURE":
+        return {"status": "FAILURE", "error": str(result.result)}
+    else:
+        return {"status": result.state}
+
+
+# --- 실행 엔트리포인트 ---
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=3000)

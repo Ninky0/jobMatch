@@ -2,7 +2,7 @@ import asyncio
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from schemas.job import JobInput, JobOutput
-from services.job_generator import llm_generate_job_posting
+from tasks.job_tasks import generate_job_posting_task
 
 
 # 라우터 객체 생성
@@ -33,6 +33,25 @@ def swagger_js():
     return Response(content, media_type="application/javascript")
 
 
-@router.post("/generate-job-posting", response_model=JobOutput)
-async def generate_job_posting(input_data: JobInput):
-    return await llm_generate_job_posting(input_data)
+# Celery에 작업을 맡기고 즉시 task_id만 응답
+@router.post("/generate-job-posting")
+async def generate_job(input_data: JobInput):
+    task = generate_job_posting_task.delay(input_data.dict())
+    return {"task_id": task.id}
+
+
+@router.get("/job-status/{task_id}")
+async def get_task_result(task_id: str):
+    from core.celery_app import celery_app
+
+    # 즉시 반환되므로 timeout 없음
+    result = celery_app.AsyncResult(task_id)
+    
+    if result.state == "PENDING":
+        return {"status": "PENDING"}
+    elif result.state == "SUCCESS":
+        return {"status": "SUCCESS", "result": result.result}
+    elif result.state == "FAILURE":
+        return {"status": "FAILURE", "error": str(result.result)}
+    else:
+        return {"status": result.state}
